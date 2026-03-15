@@ -162,6 +162,9 @@ class PredictionNode:
             os.unlink(temp_path)
         except OSError:
             pass
+
+        # Post-process: fix contradictory VLM risk/motion outputs
+        reasoning = self._postprocess_predictions(reasoning, filtered_objects)
             
         return PredictionResult(
             frame_id=perception_result.frame_id,
@@ -174,6 +177,111 @@ class PredictionNode:
         os.close(fd)
         resized.save(path)
         return path
+
+    @staticmethod
+    def _postprocess_predictions(
+        reasoning: str, filtered_objects: list[dict]
+    ) -> str:
+        """
+        Fix contradictory VLM outputs using physics-based rules:
+        1. Objects moving away → always LOW risk.
+        2. Speed > 0.5 m/s but marked "Stationary" → fix motion description.
+        3. Close-range objects ahead → bump risk if too low.
+        4. Enrich generic reasoning with actual kinematic data.
+        """
+        # Build a lookup from filtered_objects for distance/speed data
+        obj_lookup: dict[str, dict] = {}
+        for o in filtered_objects:
+            obj_lookup[o["id"]] = o
+
+        # Parse the VLM JSON
+        clean = reasoning.strip()
+        clean = re.sub(r'^```json\s*', '', clean)
+        clean = re.sub(r'\s*```$', '', clean)
+        try:
+            data = json.loads(clean)
+        except json.JSONDecodeError:
+            return reasoning  # Can't fix what we can't parse
+
+        predictions = []
+        if isinstance(data, list):
+            predictions = data
+        elif isinstance(data, dict) and "scene_prediction" in data:
+            predictions = data["scene_prediction"]
+        else:
+            return reasoning
+
+        for pred in predictions:
+            obj_id = pred.get("id", "")
+            motion = pred.get("future_motion", "").lower()
+            risk = pred.get("risk_level", "LOW").upper()
+            src = obj_lookup.get(obj_id, {})
+            speed = src.get("speed_ms", 0.0)
+            dist = src.get("dist_m", 999.0)
+            view = src.get("view", "")
+            category = pred.get("category", "Unknown")
+
+            # ── Rule 1: Moving away = always LOW ──────────────────────
+            away_keywords = ["diverging", "falling behind", "moving away"]
+            if any(kw in motion for kw in away_keywords):
+                pred["risk_level"] = "LOW"
+                pred["kinematic_reasoning"] = (
+                    f"Object at {dist}m is moving away at {speed}m/s — "
+                    f"no collision risk."
+                )
+
+            # ── Rule 2: Fix "Stationary" when speed > 0.5 ────────────
+            if "stationary" in motion and speed > 0.5:
+                if view == "Front":
+                    pred["future_motion"] = f"Slow-moving at {speed}m/s ahead"
+                else:
+                    pred["future_motion"] = f"Slow-moving at {speed}m/s"
+
+            # ── Rule 3: Close-range objects ahead need higher risk ─────
+            if view == "Front" and dist < 15.0:
+                if category in ("Confirmed", "Fogged"):
+                    if "stationary" in pred.get("future_motion", "").lower() or speed < 0.5:
+                        pred["risk_level"] = "HIGH"
+                        pred["kinematic_reasoning"] = (
+                            f"Radar-confirmed object stopped at {dist}m directly "
+                            f"ahead — imminent collision risk."
+                        )
+                    elif risk == "LOW":
+                        pred["risk_level"] = "MODERATE"
+                        pred["kinematic_reasoning"] = (
+                            f"Radar-confirmed object at {dist}m ahead moving at "
+                            f"{speed}m/s — potential hazard."
+                        )
+                elif category == "Ghost":
+                    # Visible but no radar — still close, so at least MODERATE
+                    if speed < 0.5:
+                        pred["risk_level"] = "MODERATE"
+                        pred["kinematic_reasoning"] = (
+                            f"Visible stationary object at {dist}m ahead without "
+                            f"radar — possible real obstacle."
+                        )
+                    elif risk == "LOW":
+                        pred["risk_level"] = "MODERATE"
+                        pred["kinematic_reasoning"] = (
+                            f"Visible object at {dist}m moving at {speed}m/s — "
+                            f"needs monitoring."
+                        )
+
+            # ── Rule 4: Enrich generic reasoning ──────────────────────
+            reasoning_text = pred.get("kinematic_reasoning", "")
+            if reasoning_text and "no risk" in reasoning_text.lower() and dist < 20.0:
+                pred["kinematic_reasoning"] = (
+                    f"Object at {dist}m with speed {speed}m/s — "
+                    f"close proximity requires attention."
+                )
+
+        # Re-wrap
+        if isinstance(data, list):
+            return f"```json\n{json.dumps(data, indent=4)}\n```"
+        else:
+            data["scene_prediction"] = predictions
+            return f"```json\n{json.dumps(data, indent=4)}\n```"
+
 
     @staticmethod
     def _build_prediction_prompt(filtered_objects: list[dict]) -> str:
@@ -204,6 +312,7 @@ class PredictionNode:
             '        {',
             '            "id": "<id>",',
             '            "category": "Fogged/Ghost/Confirmed",',
+            '            "speed": "e.g., 7.9m/s",',
             '            "future_motion": "Describe future trajectory based on motion_hint.",',
             '            "kinematic_reasoning": "Reason about risk using dist and v_rel_x.",',
             '            "risk_level": "LOW/MODERATE/HIGH"',

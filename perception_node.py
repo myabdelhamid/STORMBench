@@ -337,6 +337,46 @@ class AnchoredPerceptionNode:
             except OSError:
                 pass
 
+            # ── Close‑range visibility override ──────────────────────────
+            # The 3-bit VLM frequently marks nearby objects as "not visible"
+            # due to fog‑bias.  Objects under 15 m are almost always visible
+            # in the camera image (the photo confirms this).  We correct the
+            # VLM's JSON in‑place so that the Python categoriser produces
+            # the right bucket (Ghost instead of Unknown).
+            sorted_dets = sorted(detections, key=lambda d: d.get("dist", 999))[:3]
+            close_ids: set[str] = set()
+            cls_cnts: dict[str, int] = {}
+            for d in sorted_dets:
+                cn = d.get("class", "object").lower()
+                cls_cnts[cn] = cls_cnts.get(cn, 0) + 1
+                tag = f"<{cn}_{cls_cnts[cn]}>"
+                if d.get("dist", 999) < 15.0:
+                    close_ids.add(tag)
+
+            if close_ids:
+                try:
+                    # Strip markdown wrappers to parse the JSON
+                    stripped = reasoning.strip()
+                    stripped = re.sub(r'^```json\s*', '', stripped)
+                    stripped = re.sub(r'\s*```$', '', stripped)
+                    data = json.loads(stripped)
+                    changed = False
+                    if "categorization" in data:
+                        for obj_id, props in data["categorization"].items():
+                            nid = obj_id if obj_id.startswith("<") else f"<{obj_id}>"
+                            if nid in close_ids and isinstance(props, dict):
+                                if not props.get("visible_in_camera", False):
+                                    props["visible_in_camera"] = True
+                                    # Recategorise
+                                    rad = props.get("has_radar_anchor", False)
+                                    props["category"] = "Confirmed" if rad else "Ghost"
+                                    changed = True
+                    if changed:
+                        reasoning = f"```json\n{json.dumps(data, indent=4)}\n```"
+                except (json.JSONDecodeError, KeyError):
+                    pass  # If parsing fails, keep the original reasoning
+            # ─────────────────────────────────────────────────────────────
+
             result.views[view_name] = ViewPerception(
                 view_name=view_name,
                 detections=detections,
@@ -450,12 +490,13 @@ class AnchoredPerceptionNode:
                 dist = d.get("dist", 0.0)
                 status = "stopped" if speed < 0.5 else f"moving at {speed:.1f}m/s"
                 # Pre-compute radar match in Python to save the 3-bit VLM cognitive load
-                # Margins: 5.0 meters for distance, 10.0 m/s for speed (to allow for radar doppler noise)
+                # Margins: 20.0 meters for distance (radar range noise in fog),
+                #          10.0 m/s for speed (to allow for radar doppler noise)
                 radar_match = "False"
                 for a in anchors:
                     dist_delta = abs(a['dist_m'] - dist)
                     speed_delta = abs(a['max_speed_ms'] - speed)
-                    dist_match = dist_delta < 5.0
+                    dist_match = dist_delta < 20.0
                     speed_match = speed_delta < 10.0
                     if dist_match and speed_match:
                         radar_match = "True"
@@ -523,6 +564,13 @@ class AnchoredPerceptionNode:
                     if isinstance(props, dict):
                         vis = props.get("visible_in_camera", False)
                         rad = props.get("has_radar_anchor", False)
+                        # Close-range override: objects within 15m are almost
+                        # certainly visible even in heavy fog (the image proves
+                        # this). The VLM frequently hallucinate "not visible"
+                        # due to fog‑bias in the prompt.
+                        # We cannot recheck the distance here (only have IDs),
+                        # so we leave the VLM decision for visibility, but let
+                        # the radar tag drive the categorisation.
                         if vis and rad:
                             props["category"] = "Confirmed"
                         elif not vis and rad:

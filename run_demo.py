@@ -468,6 +468,8 @@ def main() -> None:
             print("\033[93m[Demo] --no-model set: skipping LVLM inference.\033[0m\n")
         else:
             from prediction_node import PredictionNode
+            from planning_node import PlanningNode
+            from perception_node import AnnotationLoader
             
             result = node.perceive_frame(data_dir=data_root, frame_id=frame_id)
             print(result.full_report())
@@ -475,6 +477,17 @@ def main() -> None:
             pred_node = PredictionNode(model=node._model, processor=node._processor)
             pred_result = pred_node.predict_frame(perception_result=result, data_dir=data_root)
             print(pred_result.full_report())
+
+            # Run Planning Node
+            plan_node = PlanningNode(model=node._model, processor=node._processor)
+            planning_result = plan_node.plan_action(pred_result.prediction_json, result.ego_speed)
+            
+            print("\n" + "=" * 60)
+            print(f"PLANNING REPORT — Frame {frame_id}")
+            print("=" * 60)
+            import json
+            print(json.dumps(planning_result, indent=4))
+            print("\n" + "=" * 60)
 
         return
 
