@@ -138,6 +138,11 @@ class PlanningNode:
 
         for obj in front_objects:
             risk = obj.get("risk_level", "LOW").upper()
+            
+            # ── Rule: Completely ignore safe off-road / sidewalk objects
+            if risk == "NO RISK" or risk == "NONE":
+                continue
+                
             cat = obj.get("category", "Unknown")
             priority = _RISK_PRIORITY.get(risk, 0)
 

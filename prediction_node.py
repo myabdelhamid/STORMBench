@@ -141,9 +141,12 @@ class PredictionNode:
 
                     motion_hint = motion
                     
+                    clean_id = obj_id.strip("<>")
+                    
                     filtered_objects.append({
-                        "id": f"{view_name}_{obj_id}",
+                        "id": f"{view_name}_{clean_id}",
                         "category": category,
+                        "location_in_scene": props.get("location_in_scene", "On Road"),
                         "view": view_name,
                         "dist_m": round(dist, 1),
                         "speed_ms": round(d.get("speed", 0.0), 1),
@@ -184,10 +187,11 @@ class PredictionNode:
     ) -> str:
         """
         Fix contradictory VLM outputs using physics-based rules:
-        1. Objects moving away → always LOW risk.
-        2. Speed > 0.5 m/s but marked "Stationary" → fix motion description.
-        3. Close-range objects ahead → bump risk if too low.
-        4. Enrich generic reasoning with actual kinematic data.
+        1. Objects moving away → always NO RISK.
+        2. Off-road objects → always NO RISK.
+        3. Speed > 0.5 m/s but marked "Stationary" → fix motion description.
+        4. Close-range objects ahead → bump risk if too low.
+        5. Enrich generic reasoning with actual kinematic data.
         """
         # Build a lookup from filtered_objects for distance/speed data
         obj_lookup: dict[str, dict] = {}
@@ -219,18 +223,33 @@ class PredictionNode:
             speed = src.get("speed_ms", 0.0)
             dist = src.get("dist_m", 999.0)
             view = src.get("view", "")
-            category = pred.get("category", "Unknown")
+            
+            # Enforce the true category from the perception input (don't trust VLM)
+            true_category = src.get("category", pred.get("category", "Unknown"))
+            pred["category"] = true_category
 
-            # ── Rule 1: Moving away = always LOW ──────────────────────
+            # ── Rule 1: Moving away = always NO RISK ──────────────────────
             away_keywords = ["diverging", "falling behind", "moving away"]
             if any(kw in motion for kw in away_keywords):
-                pred["risk_level"] = "LOW"
+                pred["risk_level"] = "NO RISK"
                 pred["kinematic_reasoning"] = (
                     f"Object at {dist}m is moving away at {speed}m/s — "
                     f"no collision risk."
                 )
+                continue
 
-            # ── Rule 2: Fix "Stationary" when speed > 0.5 ────────────
+            # ── Rule 2: Off-road objects are NO RISK ─────
+            location = src.get("location_in_scene", "On Road")
+            pred["location_in_scene"] = location
+            if location in ["On Sidewalk", "Off Road"]:
+                pred["risk_level"] = "NO RISK"
+                pred["kinematic_reasoning"] = (
+                    f"Object is {location.lower()} — "
+                    f"no collision risk."
+                )
+                continue
+
+            # ── Rule 3: Fix "Stationary" when speed > 0.5 ────────────
             if "stationary" in motion and speed > 0.5:
                 if view == "Front":
                     pred["future_motion"] = f"Slow-moving at {speed}m/s ahead"
@@ -239,7 +258,7 @@ class PredictionNode:
 
             # ── Rule 3: Close-range objects ahead need higher risk ─────
             if view == "Front" and dist < 15.0:
-                if category in ("Confirmed", "Fogged"):
+                if true_category in ("Confirmed", "Fogged"):
                     if "stationary" in pred.get("future_motion", "").lower() or speed < 0.5:
                         pred["risk_level"] = "HIGH"
                         pred["kinematic_reasoning"] = (
@@ -252,7 +271,7 @@ class PredictionNode:
                             f"Radar-confirmed object at {dist}m ahead moving at "
                             f"{speed}m/s — potential hazard."
                         )
-                elif category == "Ghost":
+                elif true_category == "Ghost":
                     # Visible but no radar — still close, so at least MODERATE
                     if speed < 0.5:
                         pred["risk_level"] = "MODERATE"

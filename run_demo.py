@@ -116,9 +116,13 @@ def _load_real_frame(data_root: Path, frame_id: str, use_radar: bool = True) -> 
 
 def _detect_frame_id(data_root: Path) -> str:
     """Auto-detect the frame ID from the first camera file found."""
-    for f in sorted(data_root.iterdir()):
-        if f.name.endswith("_camera0.png") or f.name.endswith("_camera0.jpg"):
-            return f.name.split("_camera0")[0]
+    search_dirs = [data_root, data_root / "dataset"]
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        for f in sorted(d.iterdir()):
+            if f.name.endswith("_camera0.png") or f.name.endswith("_camera0.jpg"):
+                return f.name.split("_camera0")[0]
     raise FileNotFoundError(
         f"No *_camera0.png files found in {data_root}. "
         "Pass --frame <frame_id> explicitly."
@@ -400,7 +404,7 @@ def main() -> None:
     ap.add_argument("--baseline", action="store_true",
                     help="Run camera-only baseline (no radar context)")
     ap.add_argument("--perceive", action="store_true",
-                    help="Run DriveLM-style perception (YAML annotations + radar + VLM reasoning)")
+                    help="Run full application")
     ap.add_argument("--frame", default=None,
                     help="Frame ID to load (e.g. 000436). With --real, auto-detected if omitted.")
     ap.add_argument("--data-root", default=".",
@@ -409,6 +413,10 @@ def main() -> None:
                     help="Do not delete the synthetic temp directory after demo")
     ap.add_argument("--no-model", action="store_true",
                     help="Skip model inference — only print the prompt (faster for testing)")
+    ap.add_argument("--no-radar", action="store_true",
+                    help="Run without radar readings (rely solely on camera perception)")
+    ap.add_argument("--evaluate", action="store_true",
+                    help="Run LLM-as-a-Judge to evaluate Pipeline A (with radar) vs B (no radar)")
     args = ap.parse_args()
 
     data_root = Path(args.data_root)
@@ -416,6 +424,10 @@ def main() -> None:
 
     # ── Data source: real vs synthetic ────────────────────────────────────
     if args.real:
+        # If dataset folder exists and no root specified, use it
+        if args.data_root == "." and (data_root / "dataset").is_dir():
+            data_root = data_root / "dataset"
+            
         frame_id = args.frame or _detect_frame_id(data_root)
         print(f"\033[94m[Demo] Real data mode — frame: {frame_id} | root: {data_root}\033[0m")
     else:
@@ -441,8 +453,11 @@ def main() -> None:
             yaml_path = data_root / f"{frame_id}.yaml"
             annotations = AnnotationLoader.load(yaml_path)
 
-            rf = GlobalRadarFilter()
-            radar_anchors = rf.process(str(data_root), frame_id)
+            if args.no_radar:
+                radar_anchors = []
+            else:
+                rf = GlobalRadarFilter()
+                radar_anchors = rf.process(str(data_root), frame_id)
 
             view_map = AnchoredPerceptionNode._group_by_view(annotations, radar_anchors)
 
@@ -471,7 +486,66 @@ def main() -> None:
             from planning_node import PlanningNode
             from perception_node import AnnotationLoader
             
-            result = node.perceive_frame(data_dir=data_root, frame_id=frame_id)
+            if args.evaluate:
+                from judge_node import JudgeNode
+                
+                print(f"\n\033[94m[Demo] Running Pipeline A: With Radar...\033[0m")
+                result_a = node.perceive_frame(data_dir=data_root, frame_id=frame_id, radar_anchors=None)
+                pred_node = PredictionNode(model=node._model, processor=node._processor)
+                pred_a = pred_node.predict_frame(perception_result=result_a, data_dir=data_root)
+                plan_node = PlanningNode(model=node._model, processor=node._processor)
+                plan_a = plan_node.plan_action(pred_a.prediction_json, result_a.ego_speed)
+                
+                print(f"\n\033[94m[Demo] Running Pipeline B: No Radar...\033[0m")
+                result_b = node.perceive_frame(data_dir=data_root, frame_id=frame_id, radar_anchors=[])
+                pred_b = pred_node.predict_frame(perception_result=result_b, data_dir=data_root)
+                plan_b = plan_node.plan_action(pred_b.prediction_json, result_b.ego_speed)
+                
+                print(f"\n\033[95m[Demo] Running LLM-as-a-Judge Evaluation...\033[0m")
+                judge = JudgeNode(model=node._model, processor=node._processor)
+                
+                action_a = plan_a[1] if isinstance(plan_a, tuple) else plan_a.get("selected_action", "UNKNOWN")
+                reasoning_a = plan_a[0].get("planning_reasoning", "None provided.") if isinstance(plan_a, tuple) else plan_a.get("planning_reasoning", "None provided.")
+                # Wait, plan_action returns a dict. Let's use get:
+                action_a = plan_a.get("selected_action", "UNKNOWN")
+                reasoning_a = plan_a.get("planning_reasoning", "None provided.")
+                action_b = plan_b.get("selected_action", "UNKNOWN")
+                reasoning_b = plan_b.get("planning_reasoning", "None provided.")
+                
+                pred_a_objs = len(plan_node._parse_prediction(pred_a.prediction_json))
+                pred_b_objs = len(plan_node._parse_prediction(pred_b.prediction_json))
+                
+                weather_val = result_a.weather_type.lower()
+                if "cd" in weather_val:
+                    scenario_str = "clear day"
+                elif "fd" in weather_val:
+                    scenario_str = "heavy fog"
+                elif "hd" in weather_val:
+                    scenario_str = "heavy rain"
+                else:
+                    scenario_str = "heavy fog"
+                    
+                judge_res = judge.evaluate_frame(
+                    frame_id=frame_id,
+                    data_dir=data_root,
+                    ego_speed=result_a.ego_speed,
+                    weather_scenario=scenario_str,
+                    pipeline_a_action=action_a,
+                    pipeline_a_reasoning=reasoning_a,
+                    pipeline_a_objects=pred_a_objs,
+                    pipeline_b_action=action_b,
+                    pipeline_b_reasoning=reasoning_b,
+                    pipeline_b_objects=pred_b_objs
+                )
+                print("\n" + "=" * 60)
+                print(f"PIPELINE A (Radar): {action_a} | {reasoning_a}")
+                print(f"PIPELINE B (Camera): {action_b} | {reasoning_b}")
+                print("=" * 60)
+                print(judge_res.full_report())
+                return
+            
+            radar_anchors = [] if args.no_radar else None
+            result = node.perceive_frame(data_dir=data_root, frame_id=frame_id, radar_anchors=radar_anchors)
             print(result.full_report())
 
             pred_node = PredictionNode(model=node._model, processor=node._processor)

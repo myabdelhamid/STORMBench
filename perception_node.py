@@ -88,15 +88,17 @@ class AnnotationLoader:
             data.get("walkers", {}), obj_type="walker"
         )
         ego_speed = data.get("ego_speed", 0.0)
+        weather_type = data.get("weather_type", "cd")
 
         log.info(
             f"[AnnotationLoader] Loaded {len(vehicles)} vehicles, "
-            f"{len(walkers)} walkers, ego_speed={ego_speed:.1f} m/s"
+            f"{len(walkers)} walkers, ego_speed={ego_speed:.1f} m/s, weather={weather_type}"
         )
         return {
             "vehicles": vehicles,
             "walkers": walkers,
             "ego_speed": ego_speed,
+            "weather_type": weather_type,
         }
 
     @staticmethod
@@ -121,6 +123,9 @@ class AnnotationLoader:
                 "relative_angle": obj_data.get("relative_angle", 0.0),
                 "bp_id": obj_data.get("bp_id", ""),
             }
+            if "location_in_scene" in obj_data:
+                obj["location_in_scene"] = obj_data["location_in_scene"]
+                
             # Assign camera view based on relative angle
             obj["view"] = AnnotationLoader._angle_to_view(
                 obj["relative_angle"]
@@ -172,6 +177,7 @@ class PerceptionResult:
     """Full perception result for all views."""
     frame_id: str
     ego_speed: float = 0.0
+    weather_type: str = "cd"
     views: dict[str, ViewPerception] = field(default_factory=dict)
 
     def full_report(self) -> str:
@@ -307,9 +313,20 @@ class AnchoredPerceptionNode:
 
         # 5. Query VLM per view
         view_to_cam = {"Front": 0, "Right": 1, "Left": 2, "Back": 3}
+        weather_val = annotations.get("weather_type", "cd").lower()
+        if "cd" in weather_val:
+            scenario_str = "clear day"
+        elif "fd" in weather_val:
+            scenario_str = "heavy fog"
+        elif "fhrd" in weather_val:
+            scenario_str = "heavy fog and rain"
+        else:
+            scenario_str = "heavy fog"
+            
         result = PerceptionResult(
             frame_id=frame_id,
             ego_speed=annotations.get("ego_speed", 0.0),
+            weather_type=weather_val,
         )
 
         for view_name in _VIEW_NAMES:
@@ -319,7 +336,7 @@ class AnchoredPerceptionNode:
 
             # Build prompt
             prompt = self._build_prompt(
-                view_name, detections, anchors, scenario="heavy fog and rain"
+                view_name, detections, anchors, scenario=scenario_str
             )
             log.info(
                 f"[PerceptionNode] {view_name} view: "
@@ -329,7 +346,7 @@ class AnchoredPerceptionNode:
 
             # Save temp image and query
             temp_path = self._save_temp_image(images[cam_idx])
-            reasoning = self._query_model(temp_path, prompt)
+            reasoning = self._query_model(temp_path, prompt, detections)
 
             # Clean up
             try:
@@ -467,7 +484,7 @@ class AnchoredPerceptionNode:
         view_name: str,
         detections: list[dict[str, Any]],
         anchors: list[dict[str, Any]],
-        scenario: str = "heavy fog and rain",
+        scenario: str = "heavy fog",
     ) -> str:
         """
         Build a prompt that provides the ground truth data and asks the VLM to solely
@@ -509,10 +526,11 @@ class AnchoredPerceptionNode:
             f"\nQuestion: You are an AI safety auditor. The current weather is {scenario}.\n"
             "Analyze the scene and output your response strictly as a single valid JSON dictionary. Do NOT output any other text or markdown.\n"
             "The JSON MUST have the following two keys:\n"
-            "1. 'weather_analysis': A brief sentence describing how thick the fog or rain is, and evaluating if close-range objects are still visible.\n"
+            "1. 'weather_analysis': A brief sentence describing visibility given the current weather conditions, and evaluating if close-range objects are clearly visible.\n"
             "2. 'categorization': A dictionary mapping each Ground Truth Object mentioned above to its classification. You MUST include EVERY object listed in the 'Ground Truth Objects' section.\n\n"
-            "For each object in 'categorization', provide 'visible_in_camera' (boolean) and 'has_radar_anchor' (boolean).\n"
-            "To determine 'visible_in_camera', you MUST look at the image and verify if the object is visible. Do NOT automatically set it to false just because it is raining. If the object is close to the camera, it should be visible.\n"
+            "For each object in 'categorization', provide 'visible_in_camera' (boolean), 'has_radar_anchor' (boolean), and 'location_in_scene' (string).\n"
+            "To determine 'location_in_scene', look at the object's position in the image and classify it exactly as one of the following: 'On Road', 'On Sidewalk', or 'Off Road'.\n"
+            "To determine 'visible_in_camera', look at the image and determine if the object is visible (set true) or not visible (set false).\n"
             "Use the '(Has Radar Anchor: True/False)' tag provided in the Ground Truth Objects list to determine 'has_radar_anchor'."
         )
         prompt_parts.append(q)
@@ -523,7 +541,7 @@ class AnchoredPerceptionNode:
 # ------------------------------------------------------------------
 # LVLM query
 # ------------------------------------------------------------------
-    def _query_model(self, image_path: str, prompt: str) -> str:
+    def _query_model(self, image_path: str, prompt: str, detections: Optional[list[dict]] = None) -> str:
         """Send one image + prompt to the LVLM and return the response text."""
         from mlx_vlm import generate # type: ignore[import]
 
@@ -543,19 +561,33 @@ class AnchoredPerceptionNode:
             if hasattr(result, "text")
             else str(result).strip()
         )
-        return self._clean_output(raw, self.max_words)
+        return self._clean_output(raw, detections, self.max_words)
 
 # ------------------------------------------------------------------
 # Post-processing
 # ------------------------------------------------------------------
     @staticmethod
-    def _clean_output(text: str, max_words: int = 150, margin: int = 20) -> str:
+    def _clean_output(text: str, detections: Optional[list[dict]] = None, max_words: int = 150, margin: int = 20) -> str:
         """
         Clean LVLM output:
         1. Try to extract the first valid JSON block (if the model outputs JSON).
         Then compute final categories in Python based on output components.
         2. Fallback: Remove repeated sentences and trim to word budget + margin.
         """
+        if detections is None:
+            detections = []
+            
+        # Build mapping from tag to true YAML location_in_scene
+        loc_map: dict[str, str] = {}
+        class_counts: dict[str, int] = {}
+        sorted_detections = sorted(detections, key=lambda d: d.get('dist', float('inf')))
+        for d in sorted_detections[:3]:
+            cls_name = d.get('class', 'object').lower()
+            class_counts[cls_name] = class_counts.get(cls_name, 0) + 1
+            tag = f"<{cls_name}_{class_counts[cls_name]}>"
+            if "location_in_scene" in d:
+                loc_map[tag] = d["location_in_scene"]
+
         def _process_json(data: dict) -> str:
             if "categorization" in data and isinstance(data["categorization"], dict):
                 new_cat = {}
@@ -572,16 +604,24 @@ class AnchoredPerceptionNode:
                         # so we leave the VLM decision for visibility, but let
                         # the radar tag drive the categorisation.
                         if vis and rad:
-                            props["category"] = "Confirmed"
+                             props["category"] = "Confirmed"
                         elif not vis and rad:
-                            props["category"] = "Fogged"
+                             props["category"] = "Fogged"
                         elif vis and not rad:
-                            props["category"] = "Ghost"
+                             props["category"] = "Ghost"
                         else:
-                            props["category"] = "Unknown"
+                             props["category"] = "Unknown"
+                             
+                        # Override location_in_scene from YAML if present
+                        if fixed_id in loc_map and loc_map[fixed_id]:
+                             props["location_in_scene"] = loc_map[fixed_id]
+                        elif "location_in_scene" not in props:
+                             props["location_in_scene"] = "On Road"  # default safe assumption
+                             
                         new_cat[fixed_id] = props
                 data["categorization"] = new_cat
                 return f"```json\n{json.dumps(data, indent=4)}\n```"
+            return text
 
         # --- Step 1: Look for JSON Block ---
         # First try to find markdown blocks
