@@ -1,5 +1,5 @@
 """
-STORMBench — DriveLM-Style Prediction Node (Pk)
+StormVLM — DriveLM-Style Prediction Node (Pk)
 ================================================
 Master's Thesis · GIU Berlin
 Author: Marwan Elsayed
@@ -23,9 +23,9 @@ from perception_node import PerceptionResult, _MAX_IMAGE_SIZE  # type: ignore[im
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[STORMBench %(levelname)s] %(message)s",
+    format="[StormVLM %(levelname)s] %(message)s",
 )
-log = logging.getLogger("stormbench.prediction")
+log = logging.getLogger("stormvlm.prediction")
 
 
 @dataclass
@@ -305,7 +305,7 @@ class PredictionNode:
     @staticmethod
     def _build_prediction_prompt(filtered_objects: list[dict]) -> str:
         prompt_parts = [
-            "System Task: You are the STORMBench Prediction Engine. Predict the future motion and risk level of each object.",
+            "System Task: You are the StormVLM Prediction Engine. Predict the future motion and risk level of each object.",
             "Rules:",
             "- Use the provided 'motion_hint' (approaching/diverging) to understand the object's trajectory relative to the ego vehicle.",
             "- Fogged objects are confirmed physical threats hidden by weather.",

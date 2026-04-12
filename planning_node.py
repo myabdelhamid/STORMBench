@@ -13,7 +13,7 @@ import re
 import tempfile
 from typing import Optional
 
-log = logging.getLogger("stormbench.planning")
+log = logging.getLogger("stormvlm.planning")
 
 # ── Action Space ──────────────────────────────────────────────────────────
 ACTIONS = [
@@ -122,6 +122,8 @@ class PlanningNode:
         • Fogged/Confirmed objects in front with HIGH risk → EMERGENCY_BRAKE.
         """
         if not objects:
+            if ego_speed < 0.01:
+                return None, "ACCELERATE"
             return None, "KEEP_SPEED"
 
         # Separate objects by spatial position
@@ -130,6 +132,8 @@ class PlanningNode:
 
         # ── If no objects are ahead, the path is clear ────────────────────
         if not front_objects:
+            if ego_speed < 0.01:
+                return None, "ACCELERATE"
             return None, "KEEP_SPEED"
 
         # ── Evaluate worst threat ahead ───────────────────────────────────
@@ -156,11 +160,22 @@ class PlanningNode:
                 worst = obj
 
         if worst is None:
+            if ego_speed < 0.01:
+                return None, "ACCELERATE"
             return None, "KEEP_SPEED"
 
         risk = worst.get("risk_level", "LOW").upper()
         cat = worst.get("category", "Unknown")
         motion = worst.get("future_motion", "").lower()
+
+        # ── Rule: Already stopped → never decelerate/brake further ────────
+        # If ego is stationary, either KEEP_SPEED (wait) or ACCELERATE
+        if ego_speed < 0.01:
+            # HIGH risk threat directly ahead → stay stopped (KEEP_SPEED)
+            if risk in ("HIGH", "MODERATE"):
+                return worst, "KEEP_SPEED"
+            # Otherwise safe to go
+            return worst, "ACCELERATE"
 
         # ── Decision tree ─────────────────────────────────────────────────
         # Objects moving away from us ahead are not a threat
@@ -168,12 +183,8 @@ class PlanningNode:
             return worst, "KEEP_SPEED"
 
         # HIGH risk + Fogged/Confirmed ahead → EMERGENCY_BRAKE
-        if risk == "HIGH" and cat in ("Fogged", "Confirmed"):
+        if risk == "HIGH" and cat in ("Fogged", "Confirmed", "Ghost"):
             return worst, "EMERGENCY_BRAKE"
-
-        # HIGH risk + Ghost ahead → STOP (cautious — visible but no radar)
-        if risk == "HIGH" and cat == "Ghost":
-            return worst, "STOP"
 
         # MODERATE risk ahead → DECELERATE (covers close Ghost objects too)
         if risk == "MODERATE":

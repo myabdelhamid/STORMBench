@@ -1,5 +1,5 @@
 """
-STORMBench — DriveLM-Style Anchored Perception Node
+StormVLM — DriveLM-Style Anchored Perception Node
 ====================================================
 Master's Thesis · GIU Berlin
 Author: Marwan Elsayed
@@ -33,9 +33,9 @@ from PIL import Image # type: ignore[import]
 # ---------------------------------------------------------------------------
 logging.basicConfig(
 level=logging.INFO,
-format="[STORMBench %(levelname)s] %(message)s",
+format="[StormVLM %(levelname)s] %(message)s",
 )
-log = logging.getLogger("stormbench.perception")
+log = logging.getLogger("stormvlm.perception")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -88,7 +88,7 @@ class AnnotationLoader:
             data.get("walkers", {}), obj_type="walker"
         )
         ego_speed = data.get("ego_speed", 0.0)
-        weather_type = data.get("weather_type", "cd")
+        weather_type = data.get("weather_type", "fd")
 
         log.info(
             f"[AnnotationLoader] Loaded {len(vehicles)} vehicles, "
@@ -177,7 +177,7 @@ class PerceptionResult:
     """Full perception result for all views."""
     frame_id: str
     ego_speed: float = 0.0
-    weather_type: str = "cd"
+    weather_type: str = "fd"
     views: dict[str, ViewPerception] = field(default_factory=dict)
 
     def full_report(self) -> str:
@@ -304,7 +304,7 @@ class AnchoredPerceptionNode:
 
         # 3. Load radar anchors if not provided
         if radar_anchors is None:
-            from stormbench_loader import GlobalRadarFilter
+            from stormvlm_loader import GlobalRadarFilter
             rf = GlobalRadarFilter()
             radar_anchors = rf.process(str(data_dir), frame_id)
 
@@ -313,7 +313,7 @@ class AnchoredPerceptionNode:
 
         # 5. Query VLM per view
         view_to_cam = {"Front": 0, "Right": 1, "Left": 2, "Back": 3}
-        weather_val = annotations.get("weather_type", "cd").lower()
+        weather_val = annotations.get("weather_type", "fd").lower()
         if "cd" in weather_val:
             scenario_str = "clear day"
         elif "fd" in weather_val:

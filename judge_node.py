@@ -1,5 +1,5 @@
 """
-STORMBench — LLM-as-a-Judge Evaluation Node
+StormVLM — LLM-as-a-Judge Evaluation Node
 ============================================
 Evaluates two different pipeline outputs (e.g., Radar vs Camera-Only)
 and outputs a JSON verdict with 1-10 scores.
@@ -17,9 +17,9 @@ from perception_node import _MAX_IMAGE_SIZE  # type: ignore[import]
 
 logging.basicConfig(
     level=logging.INFO,
-    format="[STORMBench %(levelname)s] %(message)s",
+    format="[StormVLM %(levelname)s] %(message)s",
 )
-log = logging.getLogger("stormbench.judge")
+log = logging.getLogger("stormvlm.judge")
 
 
 @dataclass

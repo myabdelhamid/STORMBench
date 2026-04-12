@@ -1,5 +1,5 @@
 """
-STORMBench — Phase I: Multi-Modal Loader Engine
+StormVLM — Phase I: Multi-Modal Loader Engine
 ================================================
 Master's Thesis · GIU Berlin
 Author: Marwan Elsayed
@@ -9,7 +9,7 @@ Inference Backend: mlx-vlm (4-bit quantised, Apple Silicon)
 
 Architecture Overview
 ---------------
-STORMBenchLoader
+StormVLMLoader
   └── load_frame(frame_id)
         ├── _load_cameras()   → list[PIL.Image]
         └── _load_radars()    → list[np.memmap]  (zero-copy, stays on disk)
@@ -38,9 +38,9 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="[STORMBench %(levelname)s] %(message)s",
+    format="[StormVLM %(levelname)s] %(message)s",
 )
-log = logging.getLogger("stormbench")
+log = logging.getLogger("stormvlm")
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +69,9 @@ class FrameData:
 
 
 # ---------------------------------------------------------------------------
-# STORMBenchLoader
+# StormVLMLoader
 # ---------------------------------------------------------------------------
-class STORMBenchLoader:
+class StormVLMLoader:
     """
     Loads 4-camera and 6-radar data for a given frame from disk.
 
@@ -106,7 +106,7 @@ class STORMBenchLoader:
             raise FileNotFoundError(f"data_root not found: {self.data_root}")
 
         log.info(
-            "STORMBenchLoader initialised — radar=%s | root=%s",
+            "StormVLMLoader initialised — radar=%s | root=%s",
             self.use_radar,
             self.data_root,
         )

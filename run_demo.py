@@ -1,5 +1,5 @@
 """
-STORMBench — Phase I Demo & Smoke Test
+StormVLM — Phase I Demo & Smoke Test
 =======================================
 Generates a synthetic dataset layout (default) OR loads real flat-file data
 (--real), runs both ablation conditions, prints the reasoning logs, and
@@ -48,11 +48,11 @@ from pathlib import Path
 import numpy as np # type: ignore[import]
 from PIL import Image
 
-from stormbench_loader import FrameData, STORMBenchLoader # type: ignore[import]
+from stormvlm_loader import FrameData, StormVLMLoader # type: ignore[import]
 
 
 # =============================================================================
-# Real flat-file loader (bypasses STORMBenchLoader's nested-dir expectation)
+# Real flat-file loader (bypasses StormVLMLoader's nested-dir expectation)
 # =============================================================================
 
 CAMERA_ORDER = ["front", "back", "left", "right"]  # camera0 → camera3
@@ -75,7 +75,7 @@ def _load_real_frame(data_root: Path, frame_id: str, use_radar: bool = True) -> 
     Load real data from flat files:
       {frame_id}_camera{0-3}.png  and  {frame_id}_radar{0-5}.npy
 
-    Returns a FrameData object identical in structure to what STORMBenchLoader
+    Returns a FrameData object identical in structure to what StormVLMLoader
     would return, so the rest of the pipeline (RadarFusion, prompt builder)
     works unchanged.
     """
@@ -398,7 +398,7 @@ def _print_model_response(response: str, ablation: str) -> None:
 # =============================================================================
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="STORMBench Phase I — Demo")
+    ap = argparse.ArgumentParser(description="StormVLM Phase I — Demo")
     ap.add_argument("--real", action="store_true",
                     help="Load real flat-file data instead of generating synthetic data")
     ap.add_argument("--baseline", action="store_true",
@@ -433,7 +433,7 @@ def main() -> None:
     else:
         frame_id = args.frame or "0001"
         use_tmp = True
-        tmp_dir = tempfile.mkdtemp(prefix="stormbench_demo_")
+        tmp_dir = tempfile.mkdtemp(prefix="stormvlm_demo_")
         data_root = Path(tmp_dir)
         print(f"\033[94m[Demo] Synthetic data mode — frame: {frame_id} | tmp: {data_root}\033[0m")
         _make_synthetic_dataset(data_root, frame_id=frame_id)
@@ -448,7 +448,7 @@ def main() -> None:
         if args.no_model:
             # Quick test: just show annotations + prompt, no VLM
             from perception_node import AnnotationLoader, _VIEW_NAMES
-            from stormbench_loader import GlobalRadarFilter
+            from stormvlm_loader import GlobalRadarFilter
 
             yaml_path = data_root / f"{frame_id}.yaml"
             annotations = AnnotationLoader.load(yaml_path)
@@ -580,14 +580,14 @@ def main() -> None:
                 # Direct flat-file loading
                 frame = _load_real_frame(data_root, frame_id, use_radar=_use_radar)
                 if _use_radar and frame.radar_arrays:
-                    from stormbench_loader import GlobalRadarFilter
+                    from stormvlm_loader import GlobalRadarFilter
                     fusion = GlobalRadarFilter()
                     frame.radar_context = fusion.get_radar_context(data_root, frame_id)
                 else:
                     frame.radar_context = ""
             else:
                 # Synthetic nested-dir loading
-                loader = STORMBenchLoader(data_root, use_radar=_use_radar)
+                loader = StormVLMLoader(data_root, use_radar=_use_radar)
                 frame = loader.load_frame(frame_id)
 
             frames[mode] = frame
@@ -595,7 +595,7 @@ def main() -> None:
 
         # ── Reports ───────────────────────────────────────────────────────
         print("\n" + "=" * 76)
-        print(f"  STORMBench Phase I — Reasoning Log   Frame: {frame_id}")
+        print(f"  StormVLM Phase I — Reasoning Log   Frame: {frame_id}")
         print("=" * 76)
         for mode in modes:
             _print_frame_report(frames[mode], ablation=mode)
