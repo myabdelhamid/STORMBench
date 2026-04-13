@@ -417,6 +417,8 @@ def main() -> None:
                     help="Run without radar readings (rely solely on camera perception)")
     ap.add_argument("--evaluate", action="store_true",
                     help="Run LLM-as-a-Judge to evaluate Pipeline A (with radar) vs B (no radar)")
+    ap.add_argument("--baseline-eval", action="store_true",
+                    help="Run baseline (pre-optimization) vs optimized pipeline comparison")
     args = ap.parse_args()
 
     data_root = Path(args.data_root)
@@ -486,6 +488,127 @@ def main() -> None:
             from planning_node import PlanningNode
             from perception_node import AnnotationLoader
             
+            if args.baseline_eval:
+                from baseline_nodes import (
+                    BaselinePerceptionNode,
+                    BaselinePredictionNode,
+                    BaselinePlanningNode,
+                )
+                from prediction_node import PredictionNode
+                from planning_node import PlanningNode
+
+                # ── Run BASELINE (pre-optimization) pipeline ──────────────
+                print(f"\n\033[93m{'='*60}\033[0m")
+                print(f"\033[93m  BASELINE PIPELINE (Pre-Optimization)\033[0m")
+                print(f"\033[93m{'='*60}\033[0m")
+
+                baseline_node = BaselinePerceptionNode()
+                baseline_node._ensure_model()
+                baseline_perc = baseline_node.perceive_frame(
+                    data_dir=data_root, frame_id=frame_id
+                )
+
+                print("\n--- Baseline Perception ---")
+                for view_name, vp in baseline_perc.views.items():
+                    print(f"\n[{view_name.upper()} VIEW]")
+                    print(f"  Detections: {len(vp.detections)}")
+                    print(f"  VLM Output (raw text):")
+                    print(f"    {vp.reasoning}")
+
+                baseline_pred_node = BaselinePredictionNode(
+                    model=baseline_node._model, processor=baseline_node._processor
+                )
+                baseline_pred = baseline_pred_node.predict_frame(
+                    perception_result=baseline_perc, data_dir=data_root
+                )
+                print("\n--- Baseline Prediction ---")
+                print(f"  {baseline_pred.prediction_text}")
+
+                baseline_plan_node = BaselinePlanningNode(
+                    model=baseline_node._model, processor=baseline_node._processor
+                )
+                baseline_plan = baseline_plan_node.plan_action(
+                    baseline_pred.prediction_text, baseline_perc.ego_speed
+                )
+                print("\n--- Baseline Planning ---")
+                print(f"  Action: {baseline_plan['selected_action']}")
+                print(f"  Reasoning: {baseline_plan['planning_reasoning']}")
+
+                # ── Run OPTIMIZED (current) pipeline ──────────────────────
+                print(f"\n\033[94m{'='*60}\033[0m")
+                print(f"\033[94m  OPTIMIZED PIPELINE (Post-Optimization)\033[0m")
+                print(f"\033[94m{'='*60}\033[0m")
+
+                # Share the model from baseline node
+                node._model = baseline_node._model
+                node._processor = baseline_node._processor
+
+                opt_perc = node.perceive_frame(
+                    data_dir=data_root, frame_id=frame_id
+                )
+
+                print("\n--- Optimized Perception ---")
+                for view_name, vp in opt_perc.views.items():
+                    print(f"\n[{view_name.upper()} VIEW]")
+                    print(f"  Detections: {len(vp.detections)}")
+                    print(f"  VLM Output (structured):")
+                    print(f"    {vp.reasoning}")
+
+                opt_pred_node = PredictionNode(
+                    model=node._model, processor=node._processor
+                )
+                opt_pred = opt_pred_node.predict_frame(
+                    perception_result=opt_perc, data_dir=data_root
+                )
+                print("\n--- Optimized Prediction ---")
+                print(f"  {opt_pred.prediction_json}")
+
+                opt_plan_node = PlanningNode(
+                    model=node._model, processor=node._processor
+                )
+                opt_plan = opt_plan_node.plan_action(
+                    opt_pred.prediction_json, opt_perc.ego_speed
+                )
+                print("\n--- Optimized Planning ---")
+                print(f"  Action: {opt_plan['selected_action']}")
+                print(f"  Reasoning: {opt_plan['planning_reasoning']}")
+
+                # ── EVALUATION SCORING ────────────────────────────────────
+                from evaluation_node import EvaluationRunner
+                from stormvlm_loader import GlobalRadarFilter
+
+                print(f"\n\033[95m{'='*60}\033[0m")
+                print(f"\033[95m  SCORING BOTH PIPELINES...\033[0m")
+                print(f"\033[95m{'='*60}\033[0m")
+
+                # Load ground truth for scoring
+                yaml_path = data_root / f"{frame_id}.yaml"
+                eval_annotations = AnnotationLoader.load(yaml_path)
+                eval_rf = GlobalRadarFilter()
+                eval_radar = eval_rf.process(str(data_root), frame_id)
+
+                baseline_score = EvaluationRunner.evaluate_pipeline(
+                    pipeline_name="Baseline",
+                    perception_result=baseline_perc,
+                    prediction_output=baseline_pred.prediction_text,
+                    planning_result=baseline_plan,
+                    annotations=eval_annotations,
+                    radar_anchors=eval_radar,
+                )
+                optimized_score = EvaluationRunner.evaluate_pipeline(
+                    pipeline_name="Optimized",
+                    perception_result=opt_perc,
+                    prediction_output=opt_pred.prediction_json,
+                    planning_result=opt_plan,
+                    annotations=eval_annotations,
+                    radar_anchors=eval_radar,
+                )
+
+                EvaluationRunner.print_comparison(
+                    frame_id, baseline_score, optimized_score
+                )
+                return
+
             if args.evaluate:
                 from judge_node import JudgeNode
                 
